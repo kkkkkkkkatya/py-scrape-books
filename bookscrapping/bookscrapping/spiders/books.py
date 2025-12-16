@@ -1,44 +1,55 @@
 import scrapy
+from scrapy import Spider
 from scrapy.http import Response
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from twisted.internet.defer import Deferred
 
 from ..items import BookscrappingItem
+
 
 class BooksSpider(scrapy.Spider):
     name = "books"
     allowed_domains = ["books.toscrape.com"]
     start_urls = ["https://books.toscrape.com/"]
 
-    def parse(self, response: Response, *args, **kwargs) -> None:
-        book_links = response.css("article.product_pod h3 a::attr(href)").getall()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.driver = webdriver.Chrome()
 
-        for url in book_links:
-            yield response.follow(url, callback=self.parse_book)
-
-        next_page = response.css("li.next a::attr(href)").get()
-        if next_page:
-            yield response.follow(next_page, callback=self.parse)
+    def close(self, reason: str) -> Deferred[None] | None:
+        self.driver.close()
+        return self.close(reason)
 
     def parse_book(self, response):
+        self.driver.get(response.url)
         book = BookscrappingItem()
 
-        book['title'] = response.css("h1::text").get()
+        book['title'] = self.driver.find_element(By.TAG_NAME, "h1").text
 
-        price_text = response.css("p.price_color::text").get()
-        if price_text:
-            book['price'] = float(price_text.replace("£", ""))
+        price_text = self.driver.find_element(By.CSS_SELECTOR, "p.price_color").text
+        book['price'] = float(price_text.replace("£", ""))
 
-        stock_text = "".join(response.css("p.instock.availability::text").getall()).strip()
+        stock_text = self.driver.find_element(By.CSS_SELECTOR, "p.instock.availability").text
         book['amount_in_stock'] = int(''.join(filter(str.isdigit, stock_text)))
 
-        rating_class = response.css("p.star-rating::attr(class)").get()
-        if rating_class:
-            book['rating'] = self._convert_rating(rating_class.split()[-1])
+        rating_element = self.driver.find_element(By.CSS_SELECTOR, "p.star-rating")
+        rating_class = rating_element.get_attribute("class").split()[-1]
+        book['rating'] = self._convert_rating(rating_class)
 
-        book['category'] = response.xpath("//ul[@class='breadcrumb']/li[3]/a/text()").get(default="Unknown")
+        try:
+            category_element = self.driver.find_element(By.XPATH, "//ul[@class='breadcrumb']/li[3]/a")
+            book['category'] = category_element.text
+        except:
+            book['category'] = "Unknown"
 
-        book['description'] = response.xpath("//div[@id='product_description']/following-sibling::p/text()").get()
+        try:
+            desc_element = self.driver.find_element(By.XPATH, "//div[@id='product_description']/following-sibling::p")
+            book['description'] = desc_element.text
+        except:
+            book['description'] = None
 
-        book['upc'] = response.xpath("//th[text()='UPC']/following-sibling::td/text()").get()
+        book['upc'] = self.driver.find_element(By.XPATH, "//th[text()='UPC']/following-sibling::td").text
 
         yield book
 
@@ -52,3 +63,16 @@ class BooksSpider(scrapy.Spider):
             "Five": 5
         }
         return ratings_map.get(rating_text, 0)
+
+    def parse(self, response: Response, **kwargs):
+        self.driver.get(response.url)
+        book_links = self.driver.find_elements(By.CSS_SELECTOR, "article.product_pod h3 a")
+
+        for link in book_links:
+            url = link.get_attribute("href")
+            yield scrapy.Request(url=url, callback=self.parse_book)
+
+        next_buttons = self.driver.find_elements(By.CSS_SELECTOR, "li.next a")
+        if next_buttons:
+            next_page_url = next_buttons[0].get_attribute("href")
+            yield scrapy.Request(url=next_page_url, callback=self.parse)
